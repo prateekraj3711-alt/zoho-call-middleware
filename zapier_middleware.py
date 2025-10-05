@@ -223,6 +223,15 @@ def process_call():
     Fetches latest call, downloads recording, transcribes, analyzes, and returns data.
     """
     try:
+        # Parse JSON from request if available
+        if request.method == 'POST' and request.data:
+            try:
+                zapier_data = request.get_json(force=True, silent=True)
+                if zapier_data:
+                    logger.info(f"Received data from Zapier: {zapier_data}")
+            except:
+                pass  # Continue without Zapier data
+        
         logger.info("Processing call request from Zapier...")
         
         # Step 1: Fetch latest call
@@ -248,9 +257,10 @@ def process_call():
         call_id = call.get('Sid')
         logger.info(f"Processing call: {call_id}")
         
-        # Extract call details
-        from_number = call.get('From', {}).get('PhoneNumber', 'Unknown')
-        to_number = call.get('To', {}).get('PhoneNumber', 'Unknown')
+        # Extract call details - Exotel returns From/To as strings
+        from_number = str(call.get('From', 'Unknown'))
+        to_number = str(call.get('To', 'Unknown'))
+        
         duration_sec = int(call.get('Duration', 0))
         duration = f"{duration_sec // 60}m {duration_sec % 60}s"
         call_time = call.get('DateCreated', 'Unknown')
@@ -327,6 +337,8 @@ def process_call():
         
     except Exception as e:
         logger.error(f"Error processing call: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({
             "status": "error",
             "message": str(e)
