@@ -1,7 +1,8 @@
 """
-Improved Zapier Middleware with Better AI Analysis
-==================================================
-Deploy this to Render to replace the current middleware
+Google Gemini Alternative Middleware
+===================================
+Uses Google Gemini instead of OpenAI for AI analysis.
+Much cheaper and better rate limits!
 """
 
 from flask import Flask, request, jsonify
@@ -9,6 +10,8 @@ import requests
 import os
 import logging
 import traceback
+import time
+import random
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,7 +30,7 @@ EXOTEL_API_KEY = os.getenv('EXOTEL_API_KEY')
 EXOTEL_API_TOKEN = os.getenv('EXOTEL_API_TOKEN')
 EXOTEL_SID = os.getenv('EXOTEL_SID')
 DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')  # New: Google Gemini API key
 
 
 @app.route('/')
@@ -35,7 +38,7 @@ def home():
     return jsonify({
         'status': 'active',
         'service': 'Zoho Desk Call Processor Middleware',
-        'version': '2.0 - Improved Analysis'
+        'version': '2.2 - Google Gemini'
     })
 
 
@@ -106,9 +109,9 @@ def process_call():
         
         logger.info(f"Transcription completed: {len(transcription)} characters")
         
-        # Analyze concern and mood with improved prompt
-        logger.info("Analyzing concern and mood...")
-        concern, mood = analyze_call_improved(transcription, call_time, duration, direction)
+        # Analyze concern and mood using Gemini
+        logger.info("Analyzing concern and mood with Gemini...")
+        concern, mood = analyze_with_gemini(transcription, call_time, duration, direction)
         
         # Prepare response
         response_data = {
@@ -204,7 +207,7 @@ def transcribe_audio(audio_content):
             "model": "general",
             "language": "en",
             "punctuate": "true",
-            "diarize": "true"  # Speaker identification
+            "diarize": "true"
         }
         
         response = requests.post(url, headers=headers, params=params, data=audio_content, timeout=60)
@@ -221,21 +224,17 @@ def transcribe_audio(audio_content):
         return ""
 
 
-def analyze_call_improved(transcription, call_time, duration, direction):
+def analyze_with_gemini(transcription, call_time, duration, direction):
     """
-    Improved analysis with better prompts to extract meaningful insights.
+    Analyze call using Google Gemini API.
+    Much cheaper and better rate limits than OpenAI!
     """
     try:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
         
-        # Enhanced prompt for better analysis
-        prompt = f"""You are analyzing a customer service call recording. Based on the transcription below, provide a detailed analysis.
+        prompt = f"""Analyze this customer service call transcription and provide:
 
-**Call Information:**
+**Call Details:**
 - Direction: {direction}
 - Duration: {duration}
 - Time: {call_time}
@@ -243,79 +242,57 @@ def analyze_call_improved(transcription, call_time, duration, direction):
 **Transcription:**
 "{transcription}"
 
-**Your Task:**
-1. **Concern**: Identify the SPECIFIC reason for the call. What exactly is the customer asking about, requesting, or trying to resolve? Be detailed and specific based on what was actually discussed. Examples:
-   - "Requesting background verification documents"
-   - "Follow-up on pending employment check status"
-   - "Inquiry about account activation process"
-   - "Technical support for login issues"
-   - "Billing dispute regarding recent charges"
-   
-2. **Mood**: Assess the caller's emotional tone in ONE word from this list:
-   - Professional, Polite, Cooperative, Satisfied, Neutral
-   - Confused, Uncertain, Anxious, Concerned
-   - Frustrated, Irritated, Angry, Urgent
+**Analysis Required:**
+1. **Concern**: What is the specific reason for this call? What does the customer need or want?
+2. **Mood**: What is the caller's emotional tone? (Professional, Polite, Frustrated, Confused, Anxious, etc.)
 
-**Important Notes:**
-- If the transcription shows only hold music, IVR messages, or "call on hold" messages WITHOUT actual conversation, respond with:
-  Concern: Caller on hold - No conversation recorded
-  Mood: Unknown
-  
-- If it's a very short call (under 10 seconds) or dropped call, respond with:
-  Concern: Brief/Dropped call - Insufficient conversation
-  Mood: Unknown
-
-- Otherwise, analyze the ACTUAL conversation content carefully.
+**Special Cases:**
+- If only hold messages: "Caller on hold - No conversation recorded"
+- If brief/dropped call: "Brief/Dropped call - Insufficient conversation"
+- Otherwise: Analyze the actual conversation
 
 **Response Format:**
-Concern: [Your detailed, specific analysis of what the caller needs/wants]
-Mood: [Single word from the list above]"""
+Concern: [specific detailed concern]
+Mood: [single word describing emotional tone]"""
         
         data = {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an expert customer service analyst. Provide accurate, specific insights based on call transcriptions."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": 150,
-            "temperature": 0.3
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 150
+            }
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(url, json=data, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
-            analysis = result['choices'][0]['message']['content']
+            content = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
             
             # Parse concern and mood
             concern = "General inquiry"
             mood = "Neutral"
             
-            for line in analysis.split('\n'):
+            for line in content.split('\n'):
                 line = line.strip()
                 if line.startswith('Concern:'):
                     concern = line.replace('Concern:', '').strip()
                 elif line.startswith('Mood:'):
                     mood = line.replace('Mood:', '').strip()
             
-            logger.info(f"Analysis: Concern='{concern}', Mood='{mood}'")
+            logger.info(f"Gemini Analysis: Concern='{concern}', Mood='{mood}'")
             return concern, mood
         else:
-            logger.error(f"OpenAI API error: {response.status_code}")
+            logger.error(f"Gemini API error: {response.status_code} - {response.text}")
             return "Analysis unavailable", "Neutral"
             
     except Exception as e:
-        logger.error(f"Error analyzing call: {e}")
+        logger.error(f"Error analyzing with Gemini: {e}")
         return "Analysis error", "Neutral"
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
-
