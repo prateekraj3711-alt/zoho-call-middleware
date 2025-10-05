@@ -1,0 +1,18 @@
+{
+  "agents": {
+    "09631084471": {
+      "name": "Prateek",
+      "department": "Customer Success",
+      "active": true
+    }
+  },
+  "default_agent": {
+    "name": "Prateek",
+    "department": "Customer Success",
+    "active": true
+  },
+  "settings": {
+    "fallback_to_default": true
+  }
+}
+
