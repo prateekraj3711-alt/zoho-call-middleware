@@ -216,7 +216,7 @@ def health():
     })
 
 
-@app.route('/process_call', methods=['POST'])
+@app.route('/process_call', methods=['POST', 'GET'])
 def process_call():
     """
     Main endpoint for Zapier to call.
@@ -229,10 +229,21 @@ def process_call():
         call = fetch_latest_call()
         
         if not call:
-            return jsonify({
+            response = {
                 "status": "no_new_calls",
-                "message": "No new calls to process"
-            }), 200
+                "message": "No new calls to process",
+                "call_id": "",
+                "customer_number": "",
+                "agent_number": "",
+                "duration": "",
+                "call_time": "",
+                "call_direction": "",
+                "concern": "",
+                "mood": "",
+                "transcript": "",
+                "transcription_length": 0
+            }
+            return jsonify(response), 200
         
         call_id = call.get('Sid')
         logger.info(f"Processing call: {call_id}")
@@ -326,4 +337,3 @@ if __name__ == '__main__':
     # For local testing
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
