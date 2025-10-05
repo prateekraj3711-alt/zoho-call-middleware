@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
 """
-Lightweight Zapier Middleware for Zoho Desk Tickets
-Handles: Exotel call fetching, transcription, and returns data to Zapier
+Improved Zapier Middleware with Better AI Analysis
+==================================================
+Deploy this to Render to replace the current middleware
 """
 
 from flask import Flask, request, jsonify
 import requests
 import os
 import logging
-from datetime import datetime
+import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,336 +16,306 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s:%(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
-EXOTEL_SID = os.getenv('EXOTEL_SID')
+# API Credentials
 EXOTEL_API_KEY = os.getenv('EXOTEL_API_KEY')
 EXOTEL_API_TOKEN = os.getenv('EXOTEL_API_TOKEN')
+EXOTEL_SID = os.getenv('EXOTEL_SID')
 DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Simple in-memory tracking of processed calls
-processed_calls = set()
+
+@app.route('/')
+def home():
+    return jsonify({
+        'status': 'active',
+        'service': 'Zoho Desk Call Processor Middleware',
+        'version': '2.0 - Improved Analysis'
+    })
+
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy', 'message': 'Service is running'}), 200
+
+
+@app.route('/process_call', methods=['POST'])
+def process_call():
+    """Process the latest call from Exotel."""
+    try:
+        # Log incoming request
+        incoming_data = request.get_json(force=True, silent=True) or {}
+        logger.info(f"Received data from Zapier: {incoming_data}")
+        logger.info("Processing call request from Zapier...")
+        
+        # Fetch latest call from Exotel
+        call = fetch_latest_call()
+        if not call:
+            logger.info("No new calls to process")
+            return jsonify({
+                'status': 'no_new_calls',
+                'call_id': '',
+                'customer_number': '',
+                'agent_number': '',
+                'call_time': '',
+                'duration': '',
+                'call_direction': '',
+                'transcript': '',
+                'transcription_length': 0,
+                'concern': '',
+                'mood': '',
+                'message': 'No new calls found'
+            })
+        
+        call_sid = call.get('Sid')
+        logger.info(f"Processing call: {call_sid}")
+        
+        # Extract call details
+        from_number = str(call.get('From', 'Unknown'))
+        to_number = str(call.get('To', 'Unknown'))
+        call_time = call.get('StartTime', 'Unknown')
+        duration_raw = call.get('Duration', 0)
+        recording_url = call.get('RecordingUrl')
+        direction = call.get('Direction', 'Unknown')
+        
+        # Convert duration to readable format
+        try:
+            duration_seconds = int(duration_raw)
+            duration = f"{duration_seconds // 60}m {duration_seconds % 60}s"
+        except:
+            duration = "0m 0s"
+        
+        # Download recording
+        logger.info("Downloading recording...")
+        audio_content = download_recording(recording_url, call_sid)
+        if not audio_content:
+            logger.error("Failed to download recording")
+            return jsonify({'status': 'error', 'message': 'Failed to download recording'}), 500
+        
+        # Transcribe
+        logger.info("Transcribing audio...")
+        transcription = transcribe_audio(audio_content)
+        if not transcription:
+            logger.error("Transcription failed")
+            return jsonify({'status': 'error', 'message': 'Transcription failed'}), 500
+        
+        logger.info(f"Transcription completed: {len(transcription)} characters")
+        
+        # Analyze concern and mood with improved prompt
+        logger.info("Analyzing concern and mood...")
+        concern, mood = analyze_call_improved(transcription, call_time, duration, direction)
+        
+        # Prepare response
+        response_data = {
+            'status': 'success',
+            'call_id': call_sid,
+            'customer_number': from_number,
+            'agent_number': to_number,
+            'call_time': call_time,
+            'duration': duration,
+            'call_direction': direction,
+            'transcript': transcription,
+            'transcription_length': len(transcription),
+            'concern': concern,
+            'mood': mood
+        }
+        
+        logger.info(f"Successfully processed call {call_sid}")
+        return jsonify(response_data)
+        
+    except Exception as e:
+        error_msg = f"Error processing call: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'status': 'error',
+            'message': error_msg,
+            'call_id': '',
+            'customer_number': '',
+            'agent_number': '',
+            'call_time': '',
+            'duration': '',
+            'call_direction': '',
+            'transcript': '',
+            'transcription_length': 0,
+            'concern': '',
+            'mood': ''
+        }), 500
 
 
 def fetch_latest_call():
-    """Fetch the latest unprocessed call from Exotel."""
+    """Fetch the most recent completed call with recording from Exotel."""
     try:
         url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json"
-        auth = (EXOTEL_API_KEY, EXOTEL_API_TOKEN)
+        auth = requests.auth.HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
         params = {'PageSize': 10, 'Page': 0}
         
-        response = requests.get(url, auth=auth, params=params, timeout=10)
+        response = requests.get(url, auth=auth, params=params, timeout=30)
         
-        if response.status_code == 200:
-            calls = response.json().get('Calls', [])
-            
-            # Find first completed call with recording that hasn't been processed
-            for call in calls:
-                call_id = call.get('Sid')
-                if (call.get('Status') == 'completed' and 
-                    call.get('RecordingUrl') and 
-                    call_id not in processed_calls):
-                    return call
-            
+        if response.status_code != 200:
+            logger.error(f"Exotel API error: {response.status_code}")
             return None
-        else:
-            logger.error(f"Failed to fetch calls: {response.status_code}")
-            return None
-            
+        
+        data = response.json()
+        calls = data.get('Calls', [])
+        
+        # Find the most recent completed call with a recording
+        for call in calls:
+            if call.get('Status') == 'completed' and call.get('RecordingUrl'):
+                return call
+        
+        return None
+        
     except Exception as e:
         logger.error(f"Error fetching calls: {e}")
         return None
 
 
-def download_recording(recording_url):
-    """Download recording from Exotel."""
+def download_recording(recording_url, call_sid):
+    """Download audio recording from Exotel."""
     try:
-        auth = (EXOTEL_API_KEY, EXOTEL_API_TOKEN)
-        response = requests.get(recording_url, auth=auth, timeout=30)
+        auth = requests.auth.HTTPBasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
+        response = requests.get(recording_url, auth=auth, timeout=60)
         
         if response.status_code == 200:
             return response.content
         else:
             logger.error(f"Failed to download recording: {response.status_code}")
             return None
-            
     except Exception as e:
         logger.error(f"Error downloading recording: {e}")
         return None
 
 
-def transcribe_audio(audio_data):
+def transcribe_audio(audio_content):
     """Transcribe audio using Deepgram."""
-    if not DEEPGRAM_API_KEY:
-        return None
-    
     try:
         url = "https://api.deepgram.com/v1/listen"
         headers = {
             "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type": "audio/mpeg"
+            "Content-Type": "audio/wav"
+        }
+        params = {
+            "model": "general",
+            "language": "en",
+            "punctuate": "true",
+            "diarize": "true"  # Speaker identification
         }
         
-        response = requests.post(url, headers=headers, data=audio_data, timeout=30)
+        response = requests.post(url, headers=headers, params=params, data=audio_content, timeout=60)
         
         if response.status_code == 200:
             data = response.json()
             transcript = data.get('results', {}).get('channels', [{}])[0].get('alternatives', [{}])[0].get('transcript', '')
-            logger.info(f"Transcription completed: {len(transcript)} characters")
             return transcript
         else:
-            logger.error(f"Transcription failed: {response.status_code}")
-            return None
-            
+            logger.error(f"Deepgram API error: {response.status_code}")
+            return ""
     except Exception as e:
-        logger.error(f"Error transcribing: {e}")
-        return None
+        logger.error(f"Transcription error: {e}")
+        return ""
 
 
-def analyze_concern_and_mood(transcript):
-    """Analyze concern and mood using OpenAI or keywords."""
-    if not transcript:
-        return "Call inquiry", "Neutral"
-    
-    # Try OpenAI first
-    if OPENAI_API_KEY:
-        try:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an AI assistant analyzing customer service calls. Provide a brief concern summary (1-2 sentences) and mood (Positive/Neutral/Negative/Urgent)."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Analyze this call transcript:\n\n{transcript[:1000]}\n\nProvide:\n1. Main concern (brief)\n2. Customer mood"
-                    }
-                ],
-                "temperature": 0.3,
-                "max_tokens": 150
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                response_text = data['choices'][0]['message']['content']
-                
-                # Parse response
-                lines = response_text.split('\n')
-                concern = "Call inquiry"
-                mood = "Neutral"
-                
-                for line in lines:
-                    if 'concern' in line.lower() or '1.' in line:
-                        concern = line.split(':', 1)[-1].strip()
-                    elif 'mood' in line.lower() or '2.' in line:
-                        mood = line.split(':', 1)[-1].strip()
-                
-                return concern, mood
-                
-        except Exception as e:
-            logger.warning(f"OpenAI analysis failed: {e}, using keyword analysis")
-    
-    # Fallback to keyword analysis
-    return analyze_with_keywords(transcript)
-
-
-def analyze_with_keywords(transcript):
-    """Fallback keyword-based analysis."""
-    transcript_lower = transcript.lower()
-    
-    # Mood analysis
-    if any(word in transcript_lower for word in ['urgent', 'emergency', 'immediately', 'asap']):
-        mood = "Urgent"
-    elif any(word in transcript_lower for word in ['angry', 'frustrated', 'disappointed', 'upset']):
-        mood = "Negative"
-    elif any(word in transcript_lower for word in ['thank', 'great', 'happy', 'satisfied', 'excellent']):
-        mood = "Positive"
-    else:
-        mood = "Neutral"
-    
-    # Concern analysis
-    if any(word in transcript_lower for word in ['billing', 'payment', 'charge', 'invoice']):
-        concern = "Billing inquiry"
-    elif any(word in transcript_lower for word in ['technical', 'not working', 'error', 'problem', 'issue']):
-        concern = "Technical support request"
-    elif any(word in transcript_lower for word in ['refund', 'return', 'cancel']):
-        concern = "Refund/cancellation request"
-    elif any(word in transcript_lower for word in ['question', 'how to', 'help with']):
-        concern = "General inquiry"
-    else:
-        concern = f"Call regarding: {transcript[:80]}..." if len(transcript) > 80 else "Call inquiry"
-    
-    return concern, mood
-
-
-@app.route('/', methods=['GET'])
-def home():
-    """Health check endpoint."""
-    return jsonify({
-        "status": "running",
-        "service": "Zoho Desk Call Middleware",
-        "endpoints": {
-            "/": "Health check",
-            "/process_call": "Process latest Exotel call (POST)",
-            "/health": "Detailed health check"
-        }
-    })
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Detailed health check."""
-    return jsonify({
-        "status": "healthy",
-        "exotel_configured": bool(EXOTEL_SID and EXOTEL_API_KEY),
-        "deepgram_configured": bool(DEEPGRAM_API_KEY),
-        "openai_configured": bool(OPENAI_API_KEY),
-        "processed_calls_count": len(processed_calls)
-    })
-
-
-@app.route('/process_call', methods=['POST', 'GET'])
-def process_call():
+def analyze_call_improved(transcription, call_time, duration, direction):
     """
-    Main endpoint for Zapier to call.
-    Fetches latest call, downloads recording, transcribes, analyzes, and returns data.
+    Improved analysis with better prompts to extract meaningful insights.
     """
     try:
-        # Parse JSON from request if available
-        if request.method == 'POST' and request.data:
-            try:
-                zapier_data = request.get_json(force=True, silent=True)
-                if zapier_data:
-                    logger.info(f"Received data from Zapier: {zapier_data}")
-            except:
-                pass  # Continue without Zapier data
-        
-        logger.info("Processing call request from Zapier...")
-        
-        # Step 1: Fetch latest call
-        call = fetch_latest_call()
-        
-        if not call:
-            response = {
-                "status": "no_new_calls",
-                "message": "No new calls to process",
-                "call_id": "",
-                "customer_number": "",
-                "agent_number": "",
-                "duration": "",
-                "call_time": "",
-                "call_direction": "",
-                "concern": "",
-                "mood": "",
-                "transcript": "",
-                "transcription_length": 0
-            }
-            return jsonify(response), 200
-        
-        call_id = call.get('Sid')
-        logger.info(f"Processing call: {call_id}")
-        
-        # Extract call details - Exotel returns From/To as strings
-        from_number = str(call.get('From', 'Unknown'))
-        to_number = str(call.get('To', 'Unknown'))
-        
-        duration_sec = int(call.get('Duration', 0))
-        duration = f"{duration_sec // 60}m {duration_sec % 60}s"
-        call_time = call.get('DateCreated', 'Unknown')
-        recording_url = call.get('RecordingUrl', '')
-        
-        # Detect agent (customize based on your agent numbers)
-        agent_numbers = ['09631084471']  # Add your agent numbers here
-        
-        agent_number = None
-        customer_number = None
-        direction = "Unknown"
-        
-        for agent in agent_numbers:
-            if agent in from_number:
-                agent_number = agent
-                customer_number = to_number
-                direction = "Outgoing"
-                break
-            elif agent in to_number:
-                agent_number = agent
-                customer_number = from_number
-                direction = "Incoming"
-                break
-        
-        if not agent_number:
-            # Default to from/to logic
-            customer_number = from_number
-            agent_number = to_number
-            direction = "Incoming"
-        
-        # Step 2: Download recording
-        logger.info("Downloading recording...")
-        audio_data = download_recording(recording_url)
-        
-        if not audio_data:
-            processed_calls.add(call_id)
-            return jsonify({
-                "status": "error",
-                "message": "Failed to download recording",
-                "call_id": call_id
-            }), 500
-        
-        # Step 3: Transcribe
-        logger.info("Transcribing audio...")
-        transcript = transcribe_audio(audio_data)
-        
-        if not transcript:
-            transcript = f"Transcription unavailable. Call duration: {duration}"
-        
-        # Step 4: Analyze
-        logger.info("Analyzing concern and mood...")
-        concern, mood = analyze_concern_and_mood(transcript)
-        
-        # Step 5: Mark as processed
-        processed_calls.add(call_id)
-        
-        # Return data to Zapier
-        result = {
-            "status": "success",
-            "call_id": call_id,
-            "customer_number": customer_number,
-            "agent_number": agent_number,
-            "duration": duration,
-            "call_time": call_time,
-            "call_direction": direction,
-            "concern": concern,
-            "mood": mood,
-            "transcript": transcript,
-            "transcription_length": len(transcript)
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
         }
         
-        logger.info(f"Successfully processed call {call_id}")
-        return jsonify(result), 200
+        # Enhanced prompt for better analysis
+        prompt = f"""You are analyzing a customer service call recording. Based on the transcription below, provide a detailed analysis.
+
+**Call Information:**
+- Direction: {direction}
+- Duration: {duration}
+- Time: {call_time}
+
+**Transcription:**
+"{transcription}"
+
+**Your Task:**
+1. **Concern**: Identify the SPECIFIC reason for the call. What exactly is the customer asking about, requesting, or trying to resolve? Be detailed and specific based on what was actually discussed. Examples:
+   - "Requesting background verification documents"
+   - "Follow-up on pending employment check status"
+   - "Inquiry about account activation process"
+   - "Technical support for login issues"
+   - "Billing dispute regarding recent charges"
+   
+2. **Mood**: Assess the caller's emotional tone in ONE word from this list:
+   - Professional, Polite, Cooperative, Satisfied, Neutral
+   - Confused, Uncertain, Anxious, Concerned
+   - Frustrated, Irritated, Angry, Urgent
+
+**Important Notes:**
+- If the transcription shows only hold music, IVR messages, or "call on hold" messages WITHOUT actual conversation, respond with:
+  Concern: Caller on hold - No conversation recorded
+  Mood: Unknown
+  
+- If it's a very short call (under 10 seconds) or dropped call, respond with:
+  Concern: Brief/Dropped call - Insufficient conversation
+  Mood: Unknown
+
+- Otherwise, analyze the ACTUAL conversation content carefully.
+
+**Response Format:**
+Concern: [Your detailed, specific analysis of what the caller needs/wants]
+Mood: [Single word from the list above]"""
         
+        data = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert customer service analyst. Provide accurate, specific insights based on call transcriptions."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 150,
+            "temperature": 0.3
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            analysis = result['choices'][0]['message']['content']
+            
+            # Parse concern and mood
+            concern = "General inquiry"
+            mood = "Neutral"
+            
+            for line in analysis.split('\n'):
+                line = line.strip()
+                if line.startswith('Concern:'):
+                    concern = line.replace('Concern:', '').strip()
+                elif line.startswith('Mood:'):
+                    mood = line.replace('Mood:', '').strip()
+            
+            logger.info(f"Analysis: Concern='{concern}', Mood='{mood}'")
+            return concern, mood
+        else:
+            logger.error(f"OpenAI API error: {response.status_code}")
+            return "Analysis unavailable", "Neutral"
+            
     except Exception as e:
-        logger.error(f"Error processing call: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        logger.error(f"Error analyzing call: {e}")
+        return "Analysis error", "Neutral"
 
 
 if __name__ == '__main__':
-    # For local testing
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
